@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .config import AppSettings, TradingMode
 from .domain import (
+    Bar,
     BrokerFault,
     BrokerOrder,
     Execution,
@@ -62,7 +63,9 @@ class TradingEngine:
         self._event_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._last_decision_at: datetime | None = None
-        self._latest_data_at: datetime | None = None
+        self._latest_data_by_instrument: dict[str, datetime] = {}
+        self._decision_arrivals: dict[datetime, set[str]] = {}
+        self._decision_ready: dict[datetime, asyncio.Event] = {}
         self._active_symbols: set[tuple[str, str]] = set()
         self._intents: dict[str, OrderIntent] = {}
         self._remaining_reservations: dict[str, Decimal] = {}
@@ -109,12 +112,11 @@ class TradingEngine:
                 await self._set_state(SystemStatus.KILLED, "unexpected broker positions")
                 raise RuntimeError("paper account must be flat before initial arming")
             now = datetime.now(UTC)
-            if (
-                self._latest_data_at is None
-                or (now - self._latest_data_at).total_seconds()
-                > self.settings.risk.data_stale_seconds
-            ):
-                raise RuntimeError("cannot arm without fresh subscribed market data")
+            stale = self._stale_instruments(now, self.indicators)
+            if stale:
+                raise RuntimeError(
+                    "cannot arm without fresh regime market data: " + ", ".join(stale)
+                )
             await self._set_state(SystemStatus.ARMED, "operator armed")
             await self._record_command("ARM", actor, "daily supervised arming")
             return self.state
@@ -165,7 +167,7 @@ class TradingEngine:
             intent,
             snapshot,
             datetime.now(UTC),
-            self._latest_data_at,
+            self._oldest_data_at((*self.indicators, intent.instrument_id)),
             self.state.status is SystemStatus.ARMED,
             self._pending_entries(),
         )
@@ -285,7 +287,9 @@ class TradingEngine:
                 await self.kill(f"event-processing failure: {exc}", actor="engine")
 
     async def _market_event(self, event: MarketEvent) -> None:
-        self._latest_data_at = event.received_at
+        previous = self._latest_data_by_instrument.get(event.instrument_id)
+        if previous is None or event.received_at > previous:
+            self._latest_data_by_instrument[event.instrument_id] = event.received_at
         await self.repository.save_event(event)
         bar = self.aggregator.update(event)
         if bar is None:
@@ -293,12 +297,28 @@ class TradingEngine:
         self.bars.append(bar)
         self.ledger.mark(bar.instrument_id, bar.close)
         await self.repository.save_bar(bar)
+        self._register_decision_bar(bar)
+
+    def _register_decision_bar(self, bar: Bar) -> None:
+        if self.state.status is not SystemStatus.ARMED:
+            return
         if bar.ended_at.minute % self.settings.strategy.decision_interval_minutes != 0:
             return
-        if self._last_decision_at == bar.ended_at:
+        arrivals = self._decision_arrivals.get(bar.ended_at)
+        if self._last_decision_at is not None and bar.ended_at <= self._last_decision_at:
+            if bar.ended_at == self._last_decision_at and arrivals is not None:
+                arrivals.add(bar.instrument_id)
+                if self._required_subscriptions().issubset(arrivals):
+                    self._decision_ready[bar.ended_at].set()
             return
-        # Delay one event-loop turn so other instruments finishing the same minute can arrive.
+
         self._last_decision_at = bar.ended_at
+        arrivals = {bar.instrument_id}
+        self._decision_arrivals[bar.ended_at] = arrivals
+        ready = asyncio.Event()
+        self._decision_ready[bar.ended_at] = ready
+        if self._required_subscriptions().issubset(arrivals):
+            ready.set()
         task = asyncio.create_task(
             self._guarded_decision_cycle(bar.ended_at), name=f"decision-{bar.ended_at}"
         )
@@ -307,14 +327,37 @@ class TradingEngine:
 
     async def _guarded_decision_cycle(self, decision_at: datetime) -> None:
         try:
+            ready = self._decision_ready[decision_at]
+            try:
+                await asyncio.wait_for(
+                    ready.wait(),
+                    timeout=self.settings.strategy.decision_collection_timeout_seconds,
+                )
+            except TimeoutError:
+                if self.state.status is not SystemStatus.ARMED:
+                    return
+                arrivals = self._decision_arrivals.get(decision_at, set())
+                missing = sorted(self._required_subscriptions().difference(arrivals))
+                await self._append_audit(
+                    "DECISION_COLLECTION_TIMEOUT",
+                    "engine",
+                    {
+                        "decision_at": decision_at.isoformat(),
+                        "arrived": len(arrivals),
+                        "required": len(self._required_subscriptions()),
+                        "missing": missing,
+                    },
+                )
             await self._decision_cycle(decision_at)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             await self.kill(f"decision-cycle failure: {exc}", actor="engine")
+        finally:
+            self._decision_arrivals.pop(decision_at, None)
+            self._decision_ready.pop(decision_at, None)
 
     async def _decision_cycle(self, decision_at: datetime) -> None:
-        await asyncio.sleep(0)
         if self.state.status is not SystemStatus.ARMED:
             return
         local_time = decision_at.astimezone(ET).strftime("%H:%M")
@@ -330,6 +373,19 @@ class TradingEngine:
         )
         if local_time >= self.settings.strategy.timed_exit_et:
             return
+        aligned_spy = self._bar_for_decision("US:SPY", decision_at)
+        aligned_qqq = self._bar_for_decision("US:QQQ", decision_at)
+        if aligned_spy is None or aligned_qqq is None:
+            await self._append_audit(
+                "DECISION_SKIPPED_INCOMPLETE_REGIME",
+                "engine",
+                {
+                    "decision_at": decision_at.isoformat(),
+                    "spy_aligned": aligned_spy is not None,
+                    "qqq_aligned": aligned_qqq is not None,
+                },
+            )
+            return
         spy = self.bars.get("US:SPY")
         qqq = self.bars.get("US:QQQ")
         for strategy in self.strategies:
@@ -338,13 +394,23 @@ class TradingEngine:
             for instrument_id in self.symbols:
                 if (strategy.name, instrument_id) in self._active_symbols:
                     continue
+                aligned_instrument = self._bar_for_decision(instrument_id, decision_at)
+                if aligned_instrument is None:
+                    continue
+                feature_decision_at = max(
+                    datetime.now(UTC),
+                    decision_at,
+                    aligned_instrument.available_at,
+                    aligned_spy.available_at,
+                    aligned_qqq.available_at,
+                )
                 features = build_features(
                     strategy.name,
                     instrument_id,
                     self.bars.get(instrument_id),
                     spy,
                     qqq,
-                    decision_at,
+                    feature_decision_at,
                 )
                 if features is None:
                     continue
@@ -368,6 +434,12 @@ class TradingEngine:
             entry_order_id = self._position_entry_orders.get(key)
             if not bars or entry_order_id is None:
                 await self.kill("cannot construct controlled time exit", actor="engine")
+                return
+            if bars[-1].ended_at != decision_at:
+                await self.kill(
+                    f"missing synchronized exit bar for {position.instrument_id}",
+                    actor="engine",
+                )
                 return
             try:
                 await self.broker.cancel(entry_order_id)
@@ -396,6 +468,15 @@ class TradingEngine:
             order = await self.submit_intent(intent)
             if order is not None:
                 self._closing_positions.add(key)
+
+    def _required_subscriptions(self) -> set[str]:
+        return set((*self.symbols, *self.indicators))
+
+    def _bar_for_decision(self, instrument_id: str, decision_at: datetime) -> Bar | None:
+        bars = self.bars.get(instrument_id, 1)
+        if not bars or bars[-1].ended_at != decision_at:
+            return None
+        return bars[-1]
 
     def _strategy_window(self, strategy: str, local_time: str) -> bool:
         if strategy == "momentum":
@@ -446,14 +527,17 @@ class TradingEngine:
             if self.state.status is not SystemStatus.ARMED:
                 continue
             now = datetime.now(UTC)
-            if (
-                self._latest_data_at is None
-                or (now - self._latest_data_at).total_seconds()
-                > self.settings.risk.data_stale_seconds
-            ):
-                await self.kill("market data watchdog detected staleness", actor="engine")
-                continue
             snapshot = self.ledger.snapshot(now)
+            required = set(self.indicators)
+            required.update(position.instrument_id for position in snapshot.positions)
+            required.update(instrument_id for _strategy, instrument_id in self._active_symbols)
+            stale = self._stale_instruments(now, required)
+            if stale:
+                await self.kill(
+                    "market data watchdog detected stale instruments: " + ", ".join(stale),
+                    actor="engine",
+                )
+                continue
             daily_pnl = snapshot.daily_realized_pnl + snapshot.daily_unrealized_pnl
             if daily_pnl <= -(snapshot.nav * self.settings.risk.daily_loss_fraction):
                 await self.kill("daily loss limit reached", actor="engine")
@@ -547,9 +631,33 @@ class TradingEngine:
             pending.append(intent.model_copy(update={"quantity": remaining_quantity}))
         return tuple(pending)
 
+    def _oldest_data_at(self, instrument_ids: tuple[str, ...]) -> datetime | None:
+        timestamps = [
+            self._latest_data_by_instrument[instrument_id]
+            for instrument_id in set(instrument_ids)
+            if instrument_id in self._latest_data_by_instrument
+        ]
+        if len(timestamps) != len(set(instrument_ids)):
+            return None
+        return min(timestamps)
+
+    def _stale_instruments(
+        self, now: datetime, instrument_ids: set[str] | tuple[str, ...]
+    ) -> tuple[str, ...]:
+        maximum_age = self.settings.risk.data_stale_seconds
+        return tuple(
+            sorted(
+                instrument_id
+                for instrument_id in set(instrument_ids)
+                if instrument_id not in self._latest_data_by_instrument
+                or (now - self._latest_data_by_instrument[instrument_id]).total_seconds()
+                > maximum_age
+            )
+        )
+
     @property
     def latest_data_at(self) -> datetime | None:
-        return self._latest_data_at
+        return max(self._latest_data_by_instrument.values(), default=None)
 
     def _merge_order_event(self, incoming: BrokerOrder) -> BrokerOrder:
         try:

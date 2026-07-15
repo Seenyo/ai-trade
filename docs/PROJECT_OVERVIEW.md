@@ -112,7 +112,9 @@ The market pipeline:
 4. retains bid and ask information when available;
 5. builds point-in-time feature snapshots using only data available at the decision time;
 6. prevents features from crossing US trading-session boundaries;
-7. requires the candidate stock, SPY, and QQQ inputs to each be fresh within one minute.
+7. requires the candidate stock, SPY, and QQQ inputs to each be fresh within one minute;
+8. collects decision-minute bars behind an all-subscription barrier with a bounded timeout;
+9. requires exact decision-minute alignment for SPY, QQQ, and every candidate evaluated after the barrier.
 
 Fresh events from one subscription cannot make another stale instrument eligible for a signal. Feature generation returns no proposal when the instrument or either regime series is stale, incomplete, unavailable, or lacks sufficient same-session history.
 
@@ -286,7 +288,7 @@ Japanese equities and crypto remain planned venue expansions. They should receiv
 | Qualification CLI | Complete in code | 90-session/500-trade and sleeve-level statistical gate |
 | PostgreSQL persistence | Implemented; service validation pending | SQLAlchemy repository, schema creation, and initial Alembic migration |
 | Operator dashboard | Complete for localhost supervision | Authenticated FastAPI/Jinja dashboard and operator commands |
-| Automated testing | Passing | 25 tests, including property-based sizing and regression coverage for market freshness and sparse backtests |
+| Automated testing | Passing | 30 tests, including property-based sizing and regression coverage for per-instrument freshness, synchronized decision barriers, and sparse backtests |
 | Static quality checks | Passing | Ruff and strict mypy pass |
 | Real IBKR paper trading | Not yet demonstrated | Requires configured TWS/IB Gateway, paper account, live market-data permissions, and supervised smoke tests |
 | Paper evidence collection | Not started | No claim yet of 90 sessions or 500 trades |
@@ -300,12 +302,12 @@ As of this document date:
 
 - the project is on the `dev` branch;
 - the working implementation is published to `origin/dev`;
-- the test suite contains 25 passing tests;
+- the test suite contains 30 passing tests;
 - Ruff reports no lint failures;
 - strict mypy reports no source typing failures;
 - the application and research, backtest, and qualification command entry points have been smoke-tested locally;
 - the initial Alembic migration has a valid head;
-- recent code review findings covering stale per-symbol feature data and sparse final backtest bars have been fixed and regression-tested.
+- recent code review findings covering stale per-symbol data, synchronized decision snapshots, and sparse final backtest bars have been fixed and regression-tested.
 
 These results validate the local software contracts. They do not validate broker permissions, actual exchange data quality, realized fill behavior, network reliability, strategy profitability, or live-money safety.
 

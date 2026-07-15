@@ -44,6 +44,7 @@ class RiskSettings(BaseModel):
 
 class StrategySettings(BaseModel):
     decision_interval_minutes: int = 5
+    decision_collection_timeout_seconds: float = Field(default=1.0, gt=0, le=10)
     maximum_holding_minutes: int = 60
     momentum_start_et: str = "09:45"
     momentum_last_entry_et: str = "14:45"
