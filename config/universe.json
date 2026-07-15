@@ -1,0 +1,13 @@
+{
+  "version": "us-liquid-v1",
+  "effective_from": "2026-07-15",
+  "currency": "USD",
+  "symbols": [
+    "AAPL", "ABBV", "AMD", "AMGN", "AMZN", "AVGO", "BAC", "BRK B",
+    "CAT", "COST", "CRM", "CSCO", "CVX", "DIS", "GE", "GOOG", "GOOGL",
+    "GS", "HD", "IBM", "INTC", "JNJ", "JPM", "KO", "LLY", "MA", "META",
+    "MRK", "MSFT", "NFLX", "NVDA", "ORCL", "PEP", "PG", "QCOM", "TMO",
+    "TSLA", "UNH", "V", "WMT"
+  ],
+  "indicators_only": ["SPY", "QQQ"]
+}

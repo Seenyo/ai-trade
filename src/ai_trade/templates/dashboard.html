@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Trade · Operator</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #07100d; color: #d5f5e8; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.5rem; border-bottom: 1px solid #245241; }
+    main { padding: 1.5rem; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+    section { border: 1px solid #245241; background: #0c1915; padding: 1rem; min-height: 9rem; }
+    .metric { font-size: 1.8rem; margin: .4rem 0; }
+    button { padding: .65rem .9rem; margin: .2rem; border: 1px solid #32755a; background: #153c2e; color: white; font: inherit; cursor: pointer; }
+    button.kill { background: #a9233c; border-color: #ef476f; }
+    button.arm { background: #176b48; border-color: #39d98a; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { text-align: left; padding: .45rem; border-bottom: 1px solid #18392d; }
+    .muted { color: #7ea896; }
+    #status.KILLED { color: #ff7090; }
+    #status.ARMED { color: #39d98a; }
+  </style>
+</head>
+<body>
+  <header><strong>AI TRADE / PAPER OPERATOR</strong><span id="clock"></span></header>
+  <main>
+    <section>
+      <h2>System</h2>
+      <div id="status" class="metric {{ state.status }}">{{ state.status }}</div>
+      <div id="reason" class="muted">{{ state.reason or "Awaiting operator" }}</div>
+      <p>
+        <button class="arm" onclick="command('arm')">ARM PAPER</button>
+        <button onclick="command('disarm')">DISARM</button>
+        <button onclick="command('cancel-all')">CANCEL ALL</button>
+        <button class="kill" onclick="command('kill')">KILL</button>
+        <button onclick="command('acknowledge')">ACKNOWLEDGE</button>
+      </p>
+    </section>
+    <section>
+      <h2>Portfolio</h2>
+      <div id="nav" class="metric">${{ portfolio.nav }}</div>
+      <div>Cash <span id="cash">${{ portfolio.cash }}</span></div>
+      <div>Reserved <span id="reserved">${{ portfolio.reserved_cash }}</span></div>
+      <div>Daily P&amp;L <span id="pnl">$0</span></div>
+    </section>
+    <section style="grid-column: 1 / -1">
+      <h2>Positions</h2>
+      <table><thead><tr><th>Sleeve</th><th>Instrument</th><th>Qty</th><th>Average</th><th>Mark</th></tr></thead><tbody id="positions"></tbody></table>
+    </section>
+    <section style="grid-column: 1 / -1">
+      <h2>Orders</h2>
+      <table><thead><tr><th>Order</th><th>State</th><th>Filled</th><th>Broker ID</th></tr></thead><tbody id="orders"></tbody></table>
+    </section>
+  </main>
+  <script>
+    const csrf = {{ csrf | tojson }};
+    async function command(name) {
+      const reason = prompt(`Reason for ${name}:`, `operator ${name}`);
+      if (!reason) return;
+      const response = await fetch(`/api/operator/${name}`, {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:JSON.stringify({reason})});
+      if (!response.ok) alert(await response.text());
+    }
+    function money(value) { return `$${Number(value).toFixed(2)}`; }
+    function render(data) {
+      const state = data.state, p = data.portfolio;
+      const status = document.getElementById('status');
+      status.textContent = state.status; status.className = `metric ${state.status}`;
+      document.getElementById('reason').textContent = state.reason || '';
+      document.getElementById('nav').textContent = money(p.nav);
+      document.getElementById('cash').textContent = money(p.cash);
+      document.getElementById('reserved').textContent = money(p.reserved_cash);
+      document.getElementById('pnl').textContent = money(Number(p.daily_realized_pnl) + Number(p.daily_unrealized_pnl));
+      document.getElementById('positions').innerHTML = p.positions.map(x => `<tr><td>${x.strategy}</td><td>${x.instrument_id}</td><td>${x.quantity}</td><td>${x.average_price}</td><td>${x.market_price}</td></tr>`).join('');
+      document.getElementById('orders').innerHTML = data.orders.map(x => `<tr><td>${x.internal_order_id.slice(0,8)}</td><td>${x.state}</td><td>${x.filled_quantity}/${x.submitted_quantity}</td><td>${x.broker_order_id || '-'}</td></tr>`).join('');
+    }
+    const events = new EventSource('/api/events'); events.onmessage = event => render(JSON.parse(event.data));
+    setInterval(() => document.getElementById('clock').textContent = new Date().toISOString(), 1000);
+  </script>
+</body>
+</html>

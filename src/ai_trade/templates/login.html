@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Trade · Sign in</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    body { min-height: 100vh; display: grid; place-items: center; margin: 0; background: #07100d; color: #d5f5e8; }
+    form { width: min(28rem, 85vw); padding: 2rem; border: 1px solid #245241; background: #0c1915; }
+    label, input, button { display: block; width: 100%; box-sizing: border-box; }
+    input, button { margin-top: .7rem; padding: .8rem; font: inherit; }
+    input { background: #07100d; border: 1px solid #32755a; color: white; }
+    button { background: #39d98a; border: 0; color: #03100a; font-weight: 700; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <h1>AI Trade</h1>
+    <p>Local operator authentication</p>
+    <label>Password<input name="password" type="password" required autofocus></label>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>
