@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from .domain import Bar, FeatureSnapshot, MarketEvent
 
 ET = ZoneInfo("America/New_York")
+MAX_FEATURE_BAR_AGE = timedelta(minutes=1)
 
 
 @dataclass
@@ -122,28 +123,27 @@ def build_features(
     if len(bars) < 31 or len(spy_bars) < 31 or len(qqq_bars) < 31:
         return None
     trading_day = decision_at.astimezone(ET).date()
-    eligible = [
-        bar
-        for bar in bars
-        if bar.available_at <= decision_at
-        and bar.complete
-        and bar.ended_at.astimezone(ET).date() == trading_day
-    ]
-    spy = [
-        bar
-        for bar in spy_bars
-        if bar.available_at <= decision_at
-        and bar.complete
-        and bar.ended_at.astimezone(ET).date() == trading_day
-    ]
-    qqq = [
-        bar
-        for bar in qqq_bars
-        if bar.available_at <= decision_at
-        and bar.complete
-        and bar.ended_at.astimezone(ET).date() == trading_day
-    ]
+
+    def eligible_bars(values: Sequence[Bar]) -> list[Bar]:
+        return sorted(
+            (
+                bar
+                for bar in values
+                if bar.available_at <= decision_at
+                and bar.complete
+                and bar.ended_at.astimezone(ET).date() == trading_day
+            ),
+            key=lambda bar: bar.ended_at,
+        )
+
+    eligible = eligible_bars(bars)
+    spy = eligible_bars(spy_bars)
+    qqq = eligible_bars(qqq_bars)
     if len(eligible) < 31 or len(spy) < 31 or len(qqq) < 31:
+        return None
+    if any(
+        decision_at - series[-1].ended_at > MAX_FEATURE_BAR_AGE for series in (eligible, spy, qqq)
+    ):
         return None
 
     closes = [float(bar.close) for bar in eligible]

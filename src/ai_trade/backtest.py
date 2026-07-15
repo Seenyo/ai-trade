@@ -88,7 +88,7 @@ class BacktestRunner:
             local_time = decision_at.astimezone(ET).strftime("%H:%M")
             if local_time >= self.settings.strategy.timed_exit_et:
                 self._cancel_pending()
-                self._force_close(current, decision_at, "daily_flatten")
+                self._force_close(by_symbol, current, decision_at, "daily_flatten")
             elif decision_at.minute % self.settings.strategy.decision_interval_minutes == 0:
                 self._generate_signals(by_symbol, current, symbols, decision_at)
             equity_curve.append(self.ledger.snapshot(decision_at).nav)
@@ -96,7 +96,15 @@ class BacktestRunner:
         final_time = max(by_time) if by_time else datetime.min
         if by_time:
             self._cancel_pending()
-            self._force_close(by_time[final_time], final_time, "dataset_end")
+            had_open_positions = bool(self._open)
+            self._force_close(
+                by_symbol,
+                by_time[final_time],
+                final_time,
+                "dataset_end",
+            )
+            if had_open_positions:
+                equity_curve.append(self.ledger.snapshot(final_time).nav)
         ending_nav = (
             self.ledger.snapshot(final_time).nav if by_time else self.settings.risk.starting_nav
         )
@@ -248,11 +256,33 @@ class BacktestRunner:
             self.ledger.release(intent.limit_price * Decimal(intent.quantity))
         self._pending.clear()
 
-    def _force_close(self, current: dict[str, Bar], now: datetime, reason: str) -> None:
+    def _force_close(
+        self,
+        histories: dict[str, list[Bar]],
+        current: dict[str, Bar],
+        now: datetime,
+        reason: str,
+    ) -> None:
         for key, trade in list(self._open.items()):
             bar = current.get(trade.instrument_id)
-            if bar is not None:
-                self._close(key, trade, bar.close * Decimal("0.9997"), now, reason)
+            if bar is None or bar.available_at > now or not bar.complete:
+                candidates = (
+                    candidate
+                    for candidate in histories.get(trade.instrument_id, [])
+                    if candidate.available_at <= now
+                    and candidate.ended_at <= now
+                    and candidate.complete
+                )
+                bar = max(candidates, key=lambda candidate: candidate.ended_at, default=None)
+            if bar is None:
+                raise RuntimeError(
+                    f"cannot force-close {trade.instrument_id}: no causally available bar"
+                )
+            if bar.ended_at.astimezone(ET).date() != now.astimezone(ET).date():
+                raise RuntimeError(
+                    f"cannot force-close {trade.instrument_id}: latest bar is from another session"
+                )
+            self._close(key, trade, bar.close * Decimal("0.9997"), now, reason)
 
     def _close(
         self,

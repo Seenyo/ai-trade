@@ -33,7 +33,7 @@ def test_minute_aggregator_finishes_only_on_next_bucket(now) -> None:
 
 
 def test_features_ignore_bars_not_yet_available(now) -> None:
-    start = now - timedelta(minutes=40)
+    start = now - timedelta(minutes=35)
     bars = [
         synthetic_bar("US:AAPL", start + timedelta(minutes=i), Decimal(100 + i), Decimal("100"))
         for i in range(35)
@@ -50,6 +50,41 @@ def test_features_ignore_bars_not_yet_available(now) -> None:
     snapshot = build_features("momentum", "US:AAPL", [*bars, future], spy, qqq, now)
     assert snapshot is not None
     assert snapshot.values["last_price"] != 10000
+
+
+def test_features_reject_stale_instrument_or_regime_series(now) -> None:
+    start = now - timedelta(minutes=35)
+
+    def history(instrument_id: str) -> list:
+        return [
+            synthetic_bar(
+                instrument_id,
+                start + timedelta(minutes=index),
+                Decimal("100"),
+                Decimal("100"),
+            )
+            for index in range(35)
+        ]
+
+    aapl = history("US:AAPL")
+    spy = history("US:SPY")
+    qqq = history("US:QQQ")
+    assert build_features("momentum", "US:AAPL", aapl, spy, qqq, now) is not None
+
+    for series_index in range(3):
+        inputs = [aapl, spy, qqq]
+        inputs[series_index] = inputs[series_index][:-2]
+        assert (
+            build_features(
+                "momentum",
+                "US:AAPL",
+                inputs[0],
+                inputs[1],
+                inputs[2],
+                now,
+            )
+            is None
+        )
 
 
 def test_intraday_features_do_not_cross_session_boundary(now) -> None:
