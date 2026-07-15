@@ -12,7 +12,14 @@ from ai_trade.market import synthetic_bar
 from ai_trade.memory import MemoryRepository
 
 
-async def test_engine_requires_fresh_data_and_submits_once(now, buy_intent) -> None:
+async def test_engine_requires_fresh_data_and_submits_once(buy_intent) -> None:
+    clock = datetime.now(UTC)
+    fresh_intent = buy_intent.model_copy(
+        update={
+            "created_at": clock,
+            "expires_at": clock + timedelta(seconds=30),
+        }
+    )
     settings = AppSettings(broker=BrokerSettings(account_id="PAPER-TEST"))
     broker = FakeBroker()
     repository = MemoryRepository()
@@ -23,17 +30,17 @@ async def test_engine_requires_fresh_data_and_submits_once(now, buy_intent) -> N
             instrument_id="US:SPY",
             source="test",
             event_type="PRICE",
-            event_at=now,
-            received_at=now,
-            available_at=now,
+            event_at=clock,
+            received_at=clock,
+            available_at=clock,
             payload={"tick_type": 1, "price": 500},
         )
         await broker.emit(event)
         await asyncio.sleep(0)
-        engine._latest_data_at = buy_intent.created_at
+        engine._latest_data_at = clock
         await engine.arm()
-        assert await engine.submit_intent(buy_intent) is not None
-        assert await engine.submit_intent(buy_intent) is None
+        assert await engine.submit_intent(fresh_intent) is not None
+        assert await engine.submit_intent(fresh_intent) is None
         assert len(broker.submitted) == 1
     finally:
         await engine.close()
